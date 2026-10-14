@@ -1,0 +1,13 @@
+data/
+outputs/
+checkpoints/
+weights/
+*.npz
+*.parquet
+*.mp4
+*.glb
+*.ply
+*.obj
+__pycache__/
+*.pyc
+.venv/
