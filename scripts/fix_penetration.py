@@ -86,33 +86,62 @@ def depths(pen, local, mv, mf):
     return out.reshape(local.shape[:2])
 
 
-def required_push(pen, local, depth, R, s, mv, mf, iters):
-    """Per penetrating frame: the scene-space object offset that just clears the hands.
+def candidate_directions():
+    """26 unit directions of the 3x3x3 grid (mesh coordinates)."""
+    g = np.array([(x, y, z) for x in (-1, 0, 1) for y in (-1, 0, 1) for z in (-1, 0, 1)
+                  if (x, y, z) != (0, 0, 0)], float)
+    return g / np.linalg.norm(g, axis=1, keepdims=True)
 
-    The object is pushed straight away from the penetrating hand points (direction from their
-    centroid to the mesh centre, in mesh coordinates); the smallest clearing step is found by
-    doubling then bisection with the scorer's own depth test.
+
+def min_clearing_step(pen, pts, d, mv, mf, start, iters):
+    """Smallest step along d (mesh units) that takes every point out of the mesh, or inf."""
+    def clear(step):
+        return not (depths(pen, (pts - d * step)[None], mv, mf) > 0).any()
+
+    hi = max(start, 1e-4)
+    for _ in range(iters):
+        if clear(hi):
+            break
+        hi *= 2
+    else:
+        return np.inf
+    lo = 0.0
+    for _ in range(10):
+        mid = (lo + hi) / 2
+        lo, hi = (lo, mid) if clear(mid) else (mid, hi)
+    return hi
+
+
+def required_push(pen, local, depth, R, s, mv, mf, iters, search=True):
+    """Per penetrating frame: the smallest scene-space object offset that clears the hands.
+
+    Candidate directions are the direction from the penetrating hand points to the mesh centre
+    plus the 26 grid directions; for each, the clearing step is found by doubling then bisection
+    with the scorer's own depth test, and the shortest one is kept. Only the hand points near
+    the mesh are tested, which keeps this cheap.
     """
     centre = mv.mean(0)
+    dirs = candidate_directions() if search else np.zeros((0, 3))
+    lo_box, hi_box = mv.min(0), mv.max(0)
     push = np.zeros((len(local), 3))
     for f in np.flatnonzero((depth > 0).any(1)):
-        d = centre - local[f][depth[f] > 0].mean(0)
-        d /= np.linalg.norm(d) + 1e-12
-
-        def clear(step):
-            return not (depths(pen, (local[f] - d * step)[None], mv, mf) > 0).any()
-
-        hi = max(float(depth[f].max()), 1e-4)
-        for _ in range(iters):
-            if clear(hi):
-                break
-            hi *= 2
-        lo = 0.0
-        for _ in range(10):
-            mid = (lo + hi) / 2
-            lo, hi = (lo, mid) if clear(mid) else (mid, hi)
+        pad = 2 * float(depth[f].max()) + 0.05 * np.linalg.norm(hi_box - lo_box)
+        near = ((local[f] >= lo_box - pad) & (local[f] <= hi_box + pad)).all(1)
+        pts = local[f][near]
+        d0 = centre - local[f][depth[f] > 0].mean(0)
+        d0 /= np.linalg.norm(d0) + 1e-12
+        best, best_d = np.inf, d0
+        for d in np.vstack([d0[None], dirs]):
+            step = min_clearing_step(pen, pts, d, mv, mf, float(depth[f].max()),
+                                     iters if np.isinf(best) else 3)
+            # a direction needing more than the current best is abandoned after few doublings
+            if step < best:
+                best, best_d = step, d
+        if np.isinf(best):
+            best = min_clearing_step(pen, local[f], d0, mv, mf, float(depth[f].max()), iters + 6)
+            best_d = d0
         # hand moves by -d*step in mesh units  <=>  object moves by +s*R d*step in the scene
-        push[f] = R[f] @ d * (hi * s)
+        push[f] = R[f] @ best_d * (best * s)
     return push
 
 
@@ -133,7 +162,8 @@ def smooth_envelope(push, sigma):
     return gaussian_filter1d(env, sigma, axis=0, mode="nearest")
 
 
-def fix_episode(path, pen, mhr, hand_ids, budget, margin, iters, frames=None, sigma=0.0, rounds=6):
+def fix_episode(path, pen, mhr, hand_ids, budget, margin, iters, frames=None, sigma=0.0, rounds=6,
+                search=False):
     data = dict(np.load(path))
     mesh = next(p for s in MESH_SUFFIXES if (p := path.with_name(path.stem + "_object" + s)).exists())
     mv, mf = budget_mesh(mesh, *budget)
@@ -152,7 +182,7 @@ def fix_episode(path, pen, mhr, hand_ids, budget, margin, iters, frames=None, si
     local, depth = local_depth(full_t[frames])
     before = float(depth.clip(min=0).mean())
     if sigma <= 0:
-        push = required_push(pen, local, depth, R, s, mv, mf, iters)
+        push = required_push(pen, local, depth, R, s, mv, mf, iters, search)
         nz = np.linalg.norm(push, axis=1) > 0
         push[nz] += push[nz] / np.linalg.norm(push[nz], axis=1, keepdims=True) * margin
         full_t[frames] += push
@@ -162,7 +192,7 @@ def fix_episode(path, pen, mhr, hand_ids, budget, margin, iters, frames=None, si
             local, depth = local_depth(full_t[frames] + offset[frames])
             if not (depth > 0).any():
                 break
-            push = required_push(pen, local, depth, R, s, mv, mf, iters)
+            push = required_push(pen, local, depth, R, s, mv, mf, iters, search)
             nz = np.linalg.norm(push, axis=1) > 0
             push[nz] += push[nz] / np.linalg.norm(push[nz], axis=1, keepdims=True) * margin
             full = np.zeros((T, 3))
@@ -184,6 +214,8 @@ def main():
     ap.add_argument("--iters", type=int, default=8)
     ap.add_argument("--sigma", type=float, default=0.0,
                     help="if >0, apply the push as a temporally smooth offset (Gaussian sigma, frames)")
+    ap.add_argument("--search", action="store_true",
+                    help="search 26 extra push directions for the shortest one (slow)")
     args = ap.parse_args()
     pen = load_pen()
     mhr = MHRForward(DEFAULT_MHR, device="cuda" if torch.cuda.is_available() else "cpu")
@@ -194,7 +226,7 @@ def main():
         int(p.stem.split("_")[1]) for p in args.episodes_dir.glob("episode_??????.npz"))
     for ep in eps:
         b, a, n = fix_episode(args.episodes_dir / f"episode_{ep:06d}.npz", pen, mhr, hand_ids,
-                              budget, args.margin, args.iters, scored.get(ep), args.sigma)
+                              budget, args.margin, args.iters, scored.get(ep), args.sigma, search=args.search)
         print(f"episode {ep}: mean hand depth {b * 100:.4f} -> {a * 100:.4f} (mesh units x100), "
               f"frames still penetrating {n}", flush=True)
 
