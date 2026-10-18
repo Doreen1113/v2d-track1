@@ -140,6 +140,9 @@ def required_push(pen, local, depth, R, s, mv, mf, iters, search=True):
         if np.isinf(best):
             best = min_clearing_step(pen, local[f], d0, mv, mf, float(depth[f].max()), iters + 6)
             best_d = d0
+        if not np.isfinite(best):
+            print(f"  frame {f}: no clearing step found, left as is", flush=True)
+            continue
         # hand moves by -d*step in mesh units  <=>  object moves by +s*R d*step in the scene
         push[f] = R[f] @ best_d * (best * s)
     return push
@@ -162,8 +165,16 @@ def smooth_envelope(push, sigma):
     return gaussian_filter1d(env, sigma, axis=0, mode="nearest")
 
 
+def clip_norm(x, cap):
+    """Scale rows of x down to at most cap in length (cap <= 0: no limit)."""
+    if cap <= 0:
+        return x
+    n = np.linalg.norm(x, axis=1, keepdims=True)
+    return x * np.minimum(1.0, cap / np.maximum(n, 1e-12))
+
+
 def fix_episode(path, pen, mhr, hand_ids, budget, margin, iters, frames=None, sigma=0.0, rounds=6,
-                search=False):
+                search=False, max_push=0.0):
     data = dict(np.load(path))
     mesh = next(p for s in MESH_SUFFIXES if (p := path.with_name(path.stem + "_object" + s)).exists())
     mv, mf = budget_mesh(mesh, *budget)
@@ -185,7 +196,7 @@ def fix_episode(path, pen, mhr, hand_ids, budget, margin, iters, frames=None, si
         push = required_push(pen, local, depth, R, s, mv, mf, iters, search)
         nz = np.linalg.norm(push, axis=1) > 0
         push[nz] += push[nz] / np.linalg.norm(push[nz], axis=1, keepdims=True) * margin
-        full_t[frames] += push
+        full_t[frames] += clip_norm(push, max_push)
     else:
         offset = np.zeros((T, 3))
         for _ in range(rounds):
@@ -197,7 +208,10 @@ def fix_episode(path, pen, mhr, hand_ids, budget, margin, iters, frames=None, si
             push[nz] += push[nz] / np.linalg.norm(push[nz], axis=1, keepdims=True) * margin
             full = np.zeros((T, 3))
             full[frames] = push
-            offset += smooth_envelope(full, sigma)
+            new = clip_norm(offset + smooth_envelope(full, sigma), max_push)
+            if np.allclose(new, offset):
+                break  # every remaining frame is held at the cap
+            offset = new
         full_t += offset
     local, depth = local_depth(full_t[frames])
     data["object_translation"] = full_t
@@ -214,6 +228,9 @@ def main():
     ap.add_argument("--iters", type=int, default=8)
     ap.add_argument("--sigma", type=float, default=0.0,
                     help="if >0, apply the push as a temporally smooth offset (Gaussian sigma, frames)")
+    ap.add_argument("--max-push", type=float, default=0.0,
+                    help="cap on the object offset per frame, metres (0: none); frames that would need "
+                         "more keep a small penetration instead of moving the object far")
     ap.add_argument("--search", action="store_true",
                     help="search 26 extra push directions for the shortest one (slow)")
     args = ap.parse_args()
@@ -226,7 +243,7 @@ def main():
         int(p.stem.split("_")[1]) for p in args.episodes_dir.glob("episode_??????.npz"))
     for ep in eps:
         b, a, n = fix_episode(args.episodes_dir / f"episode_{ep:06d}.npz", pen, mhr, hand_ids,
-                              budget, args.margin, args.iters, scored.get(ep), args.sigma, search=args.search)
+                              budget, args.margin, args.iters, scored.get(ep), args.sigma, search=args.search, max_push=args.max_push)
         print(f"episode {ep}: mean hand depth {b * 100:.4f} -> {a * 100:.4f} (mesh units x100), "
               f"frames still penetrating {n}", flush=True)
 

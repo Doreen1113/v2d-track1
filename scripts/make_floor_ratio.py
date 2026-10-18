@@ -6,6 +6,7 @@ This collects it into the ratio JSON read by finalize_objects_v2.py and assemble
 
     python make_floor_ratio.py
 """
+import argparse
 import json
 from pathlib import Path
 
@@ -13,10 +14,14 @@ WORK = Path("/work/doreen071/v2d/work")
 
 
 def main():
-    ratio = {str(e): json.loads((WORK / f"body_v2/metrics/episode_{e:06d}.json").read_text())
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--body", type=Path, default=WORK / "body_v2")
+    ap.add_argument("--out", type=Path, default=WORK / "moge_to_body_ratio_floor.json")
+    args = ap.parse_args()
+    ratio = {str(e): json.loads((args.body / f"metrics/episode_{e:06d}.json").read_text())
              ["floor_moge_over_body"] for e in range(30)}
-    out = WORK / "moge_to_body_ratio_floor.json"
-    out.write_text(json.dumps({"note": "MoGe/body scale from the floor plane (body_v2 metrics "
+    out = args.out
+    out.write_text(json.dumps({"note": f"MoGe/body scale from the floor plane ({args.body.name} metrics "
                                        "floor_moge_over_body)", "ratio": ratio}, indent=1))
     print(f"wrote {out}")
 
