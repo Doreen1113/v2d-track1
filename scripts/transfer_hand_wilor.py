@@ -24,6 +24,7 @@ Output: body npz unchanged except the fitted pose columns (format of the input, 
 metrics/ copied, and <out>/diag/episode_XXXXXX.json with the gate statistics and fit residuals.
 
   python transfer_hand_wilor.py --body WORK/body_vA --wilor WORK/hand_wilor --out WORK/hand_vA [--wrist none]
+  python transfer_hand_wilor.py --body WORK/body_vA_fpc --raw-dir WORK/body_fpc ...   (other intrinsics)
 """
 import argparse
 import json
@@ -311,6 +312,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--body", default=f"{WORK}/body_vA")
     ap.add_argument("--wilor", default=f"{WORK}/hand_wilor")
+    ap.add_argument("--raw-dir", default=f"{WORK}/body",
+                    help="per-frame run whose fx/fy/cx/cy belong to --body (projection, ray correction, 2D term)")
     ap.add_argument("--out", required=True)
     ap.add_argument("--episodes", type=int, nargs="*", default=list(range(30)))
     ap.add_argument("--wrist", choices=["none", "flex", "twist"], default="none")
@@ -342,7 +345,7 @@ def main():
     nb = bone_weights(a.wrist).sum()
     for ep in a.episodes:
         b = dict(np.load(f"{a.body}/episode_{ep:06d}.npz"))
-        raw = np.load(f"{WORK}/body/episode_{ep:06d}.npz")
+        raw = np.load(f"{a.raw_dir}/episode_{ep:06d}.npz")  # intrinsics of the per-frame run behind --body
         K = np.array([float(raw["fx"]), float(raw["fy"]), float(raw["cx"]), float(raw["cy"])])
         pose0 = b["pose"].astype(np.float64)
         valid = b["valid"].astype(bool)

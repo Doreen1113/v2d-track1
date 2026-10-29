@@ -63,7 +63,7 @@ def stats(a):
         fr = h["frames"]
         if len(fr) == 0:
             continue
-        raw = np.load(os.path.join(WORK, "body", f"episode_{ep:06d}.npz"))
+        raw = np.load(os.path.join(a.raw_dir, f"episode_{ep:06d}.npz"))  # intrinsics
         K = np.array([float(raw["fx"]), float(raw["fy"]), float(raw["cx"]), float(raw["cy"])])
         det = np.stack([h["left"], h["right"]], 1)  # [N,2,21,3] (L,R) like HAND_J
         conf = det[..., 2] > a.thr
@@ -146,7 +146,7 @@ def render(a):
     os.makedirs(a.out, exist_ok=True)
     Z = 4
     for ep in a.episodes:
-        raw = np.load(os.path.join(WORK, "body", f"episode_{ep:06d}.npz"))
+        raw = np.load(os.path.join(a.raw_dir, f"episode_{ep:06d}.npz"))  # intrinsics
         K = np.array([float(raw["fx"]), float(raw["fy"]), float(raw["cx"]), float(raw["cy"])])
         T = len(raw["valid"])
         wu, w = wilor_uv(a.new, ep, T)
@@ -224,6 +224,7 @@ def main():
     ap.add_argument("--base", default=f"{WORK}/body_vA")
     ap.add_argument("--new", required=True)
     ap.add_argument("--sigma-h", type=float, default=3.0)
+    ap.add_argument("--raw-dir", default=f"{WORK}/body", help="per-frame run with the intrinsics of --base/--new")
     ap.add_argument("--thr", type=float, default=0.25)
     ap.add_argument("--episodes", type=int, nargs="*", default=list(range(30)))
     ap.add_argument("--frames", type=int, nargs="*", default=None)
