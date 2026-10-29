@@ -66,11 +66,25 @@ def unwrap_euler(pose, euler_cols):
     return pose
 
 
-def assemble(ep, body_dir, obj_dir, out_dir, sigma_h, sigma_o, euler_cols, k=1.0):
+FINGER_COLS = list(range(68, 122))  # MHR finger parameters
+ARM_COLS = list(range(30, 50)) + [132, 133]  # MHR arm chain: clavicles to wrists
+
+
+def smooth_pose(pose, sigma_h, sigma_f=None, sigma_a=None):
+    """Gaussian smoothing of an unwrapped pose; optional separate sigmas for the finger and arm-chain columns."""
+    out = smooth(pose, sigma_h)
+    if sigma_f is not None:
+        out[:, FINGER_COLS] = smooth(pose[:, FINGER_COLS], sigma_f)
+    if sigma_a is not None:
+        out[:, ARM_COLS] = smooth(pose[:, ARM_COLS], sigma_a)
+    return out
+
+
+def assemble(ep, body_dir, obj_dir, out_dir, sigma_h, sigma_o, euler_cols, k=1.0, sigma_f=None, sigma_a=None,
+             depth_scale=1.0):
     body = dict(np.load(body_dir / f"episode_{ep:06d}.npz"))
     valid = body.get("valid", np.ones(len(body["pose"]), bool)).astype(bool)
-    pose = fill_invalid(body["pose"], valid)
-    pose = smooth(unwrap_euler(pose, euler_cols), sigma_h)
+    pose = smooth_pose(unwrap_euler(fill_invalid(body["pose"], valid), euler_cols), sigma_h, sigma_f, sigma_a)
     scales = np.median(np.asarray(body["scales"])[valid], axis=0) if np.ndim(body["scales"]) == 2 else body["scales"]
     shape = np.median(np.asarray(body["shape"])[valid], axis=0) if np.ndim(body["shape"]) == 2 else body["shape"]
     T = len(pose)
@@ -89,6 +103,7 @@ def assemble(ep, body_dir, obj_dir, out_dir, sigma_h, sigma_o, euler_cols, k=1.0
         t = np.repeat(np.asarray(pose_json["t"], float)[None], T, axis=0)
     R = R[:T]
     t = t[:T] * k  # object estimates live in the MoGe depth frame; k maps them to the body frame
+    t[:, 2] *= depth_scale  # body run with focal c*f: the same pixels sit at depth c*z
     s = s * k
 
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -109,16 +124,23 @@ def main():
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--sigma-h", type=float, default=2.0, help="Gaussian sigma (frames) on MHR pose")
     ap.add_argument("--sigma-o", type=float, default=3.0, help="Gaussian sigma (frames) on object pose")
+    ap.add_argument("--sigma-fingers", type=float, default=None,
+                    help="Gaussian sigma (frames) on the finger parameters (pose 68:122); default: --sigma-h")
+    ap.add_argument("--sigma-arms", type=float, default=None,
+                    help="Gaussian sigma (frames) on the arm chain (pose 30:50, 132:134); default: --sigma-h")
     ap.add_argument("--euler-cols", type=str, default="3:136",
                     help="columns of pose holding angles, unwrapped before smoothing")
     ap.add_argument("--ratio", type=Path, default=ROOT / "work/moge_to_body_ratio.json",
                     help="per-episode MoGe/body depth ratio; object t and s are divided by it")
+    ap.add_argument("--object-depth-scale", type=float, default=1.0,
+                    help="multiply object depth (t_z) by this; the focal scale of the body run vs the objects")
     args = ap.parse_args()
     ratio = json.loads(args.ratio.read_text())["ratio"] if args.ratio else {}
     a, b = (int(v) for v in args.euler_cols.split(":"))
     for ep in args.episodes:
         T = assemble(ep, args.body, args.objects, args.out, args.sigma_h, args.sigma_o, list(range(a, b)),
-                     1.0 / ratio.get(str(ep), 1.0))
+                     1.0 / ratio.get(str(ep), 1.0), sigma_f=args.sigma_fingers, sigma_a=args.sigma_arms,
+                     depth_scale=args.object_depth_scale)
         print(f"episode {ep}: {T} frames")
 
 

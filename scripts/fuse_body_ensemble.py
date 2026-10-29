@@ -9,7 +9,9 @@ B frames that are clearly worse in 2D (e_B > --ratio * e_A + --margin) or disagr
 dropped. On the kept frames the residual B - A is formed (root translation, root rotation as a rotation vector of
 R_B R_A^T in MHR's native frame, other pose parameters as wrapped angle differences, shape, scales, 2D keypoints),
 interpolated linearly over time inside each window segment, and added to A with weight --w-b (0.5 = average).
-The hand parameters (pose columns 68:122) stay A's, so B can be a body-decoder-only run (--body-only).
+The arm chain (pose columns 30:50 and 132:134: clavicle to wrist) and the fingers (68:122) stay A's: in full mode
+SAM 3D Body re-runs the body decoder with wrist / elbow prompts from its hand decoder, so a body-decoder-only B
+(--body-only) has worse arms and hands. Only the root, spine, neck / head and legs are fused.
 The weight ramps in over --ramp frames at the segment ends, so the fused sequence has no steps there.
 
   python fuse_body_ensemble.py --a WORK/body --b WORK/body_vith --out WORK/body_ens
@@ -30,6 +32,7 @@ from mhr_utils import MHRForward  # noqa: E402
 WORK = "/work/doreen071/v2d/work"
 J22 = [1, 2, 18, 35, 3, 19, 36, 4, 20, 37, 8, 24, 110, 74, 38, 113, 75, 39, 76, 40, 78, 42]
 COCO_TO_70 = [0, 1, 2, 3, 4, 5, 6, 7, 8, 62, 41, 9, 10, 11, 12, 13, 14]
+ARM_KP = [7, 8] + list(range(21, 67))  # MHR70: elbows, hand keypoints and wrists (21..62), olecranon / cubital fossa
 
 
 def err2d(kp2d, kv):
@@ -107,11 +110,13 @@ def fuse(ep, a_dir, b_dir, out_dir, mhr, args):
         Rb = Rotation.from_euler("xyz", Pb[good, 3:6])
         res[good, 3:6] = (Rb * Ra.inv()).as_rotvec()
     res[good, 6:] = wrap(Pb[good, 6:] - Pa[good, 6:])
-    a, b = (int(v) for v in args.keep_a.split(":"))
-    res[:, a:b] = 0.0  # hand parameters stay model A's (B may be a body-decoder-only run)
+    for rng_ in args.keep_a.split(","):  # arm chain and fingers stay model A's (B may be body-decoder-only)
+        a, b = (int(v) for v in rng_.split(":"))
+        res[:, a:b] = 0.0
     r_shape = np.where(good[:, None], B["shape"][:T] - A["shape"], 0.0)
     r_scales = np.where(good[:, None], B["scales"][:T] - A["scales"], 0.0)
     r_kp = np.where(good[:, None, None], B["kp2d"][:T] - A["kp2d"], 0.0)
+    r_kp[:, ARM_KP] = 0.0  # elbows, hands, wrists, olecranon / cubital fossa stay A's (as the arm parameters)
     # window segments (frames B was meant to cover and A is valid)
     win = scored_window(ep, T, args.window, args.scored) & va if args.window >= 0 else va.copy()
     seg, _ = label(win)
@@ -157,7 +162,8 @@ def main():
     ap.add_argument("--window", type=int, default=30, help="B covers scored frames +- window (-1: all frames)")
     ap.add_argument("--scored", default=f"{WORK}/body_v2/scored_frames.json")
     ap.add_argument("--ramp", type=int, default=15)
-    ap.add_argument("--keep-a", default="68:122", help="pose columns kept from model A (MHR hand parameters)")
+    ap.add_argument("--keep-a", default="30:50,68:122,132:134",
+                    help="pose columns kept from model A: arm chain (clavicle..wrist, 30:50, 132:134) and fingers")
     ap.add_argument("--ratio", type=float, default=2.0)
     ap.add_argument("--margin", type=float, default=3.0, help="pixels")
     ap.add_argument("--max-3d", type=float, default=0.12, help="metres")

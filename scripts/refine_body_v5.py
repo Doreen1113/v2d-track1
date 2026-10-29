@@ -1,4 +1,5 @@
-"""Whole-sequence body refinement, version 5: the body_v2 setting plus an upright (gravity) prior.
+"""Whole-sequence body refinement, version 5: the body_v2 setting, optionally on a fused HMR input, with two optional
+terms (upright prior, MoGe relative-depth target; both off by default).
 
 Same pipeline and default weights as refine_body_sequence.py (body_v2: per-episode median identity,
 sig_acc_rel 0.008; stage B without floor, MoGe floor plane, stages C/D with floor and contacts). Added in
@@ -19,14 +20,22 @@ Sitting, kneeling, bending, jumping and one-leg poses get no upright prior.
 The floor offset (and so floor_moge_over_body) comes from stage B exactly as in body_v2.
 
 Optional --body-in: per-frame HMR estimates in the work/body format (e.g. a fused ensemble).
+Optional --depth-target DIR (compute_moge_depth_target.py): the pelvis depth is pulled towards z_target (scale-free
+MoGe relative depth of the person; correction clipped to +-mdepth_clip, robust term with sig_mdepth, saturating
+beyond mdepth_c sigmas) in all stages; the floor offset then changes slightly, so build the
+object scale ratio from this run's metrics (make_floor_ratio.py --body OUT).
+
+The upright prior is OFF by default (--upright enables it): with it, CD-H got worse on Kaggle (S2, +0.24) even though
+the lean towards the camera became more consistent; held-out 2D error had pointed the same way (+0.02..0.04 px).
+Without --upright and without --depth-target the stages and weights are exactly body_v2's.
 
 Output: <out>/episode_XXXXXX.npz (pose [T,136], scales [68], shape [45], valid, contact, floor_n, floor_d,
 standing [T] weight, holdout, ...) and <out>/metrics/episode_XXXXXX.json (floor, floor_moge_over_body, upright
 diagnostics before / after).
 
-  python refine_body_v5.py --all --out WORK/body_v5a
-  python refine_body_v5.py --all --holdout --out WORK/body_v5a_dev/ho      # fit even frames only
-  python refine_body_v5.py --all --body-in WORK/body_ens --out WORK/body_v5
+  python refine_body_v5.py --all --no-upright --body-in WORK/body_ens2 --out WORK/body_vA      # V-A
+  python refine_body_v5.py --all --no-upright --holdout --body-in WORK/body_ens2 --out DEV/ho_vA # fit even frames
+  python refine_body_v5.py --all --upright --out WORK/body_v5a                                   # upright prior
 """
 import argparse
 import json
@@ -55,6 +64,7 @@ DEFAULT_CFG = dict(v2.DEFAULT_CFG)
 DEFAULT_CFG.update(
     w_grav=1.0, sig_grav_spine=4.0, w_grav_leg=0.0, sig_grav_leg=6.0, grav_c=3.0,  # degrees; robust cut-off in sigmas
     grav_mode="depth",                                              # "depth" or "full" (whole tilt)
+    w_mdepth=1.0, sig_mdepth=0.03, mdepth_c=4.0, mdepth_clip=0.08,  # MoGe depth target (only with --depth-target)
     w_hip=1.0, sig_hip=0.04,                                        # metres
     st_knee=30.0, st_hipflex=25.0, st_tilt=20.0, st_hh=0.85, st_swing=0.25, st_min_len=9, st_ramp=2.0,
     st_knee_straight=12.0,
@@ -139,7 +149,7 @@ def upright_stats(kp, floor, st, frames):
 
 # ------------------------------------------------------------------------------------- fitting
 def optimise(body, init, prior, K, kv, ksam, wdata, cfg, floor=None, contact=None, grav=None, iters=600, lr=0.01,
-             log=None, tag=""):
+             log=None, tag="", ztgt=None):
     """refine_body_sequence.optimise plus the upright terms (grav = (weight [T], hip target or None))."""
     dev = body.dev
     T = init.shape[0]
@@ -167,6 +177,9 @@ def optimise(body, init, prior, K, kv, ksam, wdata, cfg, floor=None, contact=Non
     samw = torch.ones(70, device=dev) * cfg["w_sam"]
     samw[15:21] = cfg["w_sam_feet"]
     samw[21:62] = cfg["w_sam"] * 0.3
+    if ztgt is not None:
+        zt = tt(np.nan_to_num(ztgt[0], nan=0.0))
+        zm = tt(ztgt[1].astype(np.float64))
     for it in range(iters):
         opt.zero_grad()
         kp, j = body(x)
@@ -223,13 +236,19 @@ def optimise(body, init, prior, K, kv, ksam, wdata, cfg, floor=None, contact=Non
                 hh = hip @ fn - fd
                 L_g = L_g + cfg["w_hip"] * (wg * gmof(((hh - htgt) / cfg["sig_hip"]).square(), c2)).sum() / T
             loss = loss + L_g
+        L_md = torch.zeros((), device=dev)
+        if ztgt is not None:
+            r2 = ((j[:, 1, 2] - zt) / cfg["sig_mdepth"]).square()
+            L_md = cfg["w_mdepth"] * (zm * gmof(r2, cfg["mdepth_c"] ** 2)).sum() / T  # robust: MoGe artefacts
+            loss = loss + L_md
         loss.backward()
         opt.step()
         sched.step()
         if log is not None and (it % 200 == 0 or it == iters - 1):
             log(f"  [{tag}] it {it:4d} loss {loss.item():9.3f} vit {L_vit.sum().item() / T:7.3f} "
                 f"sam {L_sam.sum().item() / T:7.3f} prior {L_pr.sum().item() / T:7.3f} "
-                f"smooth {cfg['w_smooth'] * L_s.item() / T:7.3f} floor {L_f.item():7.3f} upright {L_g.item():7.3f}")
+                f"smooth {cfg['w_smooth'] * L_s.item() / T:7.3f} floor {L_f.item():7.3f} upright {L_g.item():7.3f}"
+                f" mdepth {L_md.item():7.3f}")
     return x.detach().cpu().numpy().astype(np.float64)
 
 
@@ -260,6 +279,13 @@ def run_episode(ep, args, cfg, scored, log):
     st2d = stationary_feet_2d(kv, ksam, valid)
     res = {"episode": ep, "T": T, "n_valid": int(valid.sum()), "cfg": cfg, "body_in": args.body_in,
            "first_scored": f0}
+    ztgt = None
+    if args.depth_target:
+        dt = np.load(os.path.join(args.depth_target, f"episode_{ep:06d}.npz"))
+        zr = dt["z_root"][:T]
+        zt = zr * np.clip(dt["z_target"][:T] / np.maximum(zr, 1e-3), 1 - cfg["mdepth_clip"], 1 + cfg["mdepth_clip"])
+        ztgt = (zt, dt["valid_target"][:T].astype(bool) & valid)
+        res["depth_target"] = dict(dir=args.depth_target, frames=int(ztgt[1].sum()))
 
     # stage A: depth for the fixed identity from the 2D skeleton scale
     kp0, j0 = forward_np(body, pose0)
@@ -275,7 +301,7 @@ def run_episode(ep, args, cfg, scored, log):
     res["identity_depth_ratio_median"] = float(np.median(ratio))
 
     # stage B: temporal fit without floor (identical to body_v2)
-    stage_b = optimise(body, init, init, K, kv, ksam, wdata, cfg, iters=args.iters, log=log, tag="B")
+    stage_b = optimise(body, init, init, K, kv, ksam, wdata, cfg, iters=args.iters, log=log, tag="B", ztgt=ztgt)
     kpB, _ = forward_np(body, stage_b)
 
     # floor: MoGe normal, offset from the stage-B feet (identical to body_v2)
@@ -305,7 +331,7 @@ def run_episode(ep, args, cfg, scored, log):
         res["hip_target_B"] = htgt
         grav = (wst, htgt) if args.upright else None
         stage_c = optimise(body, stage_b, init, K, kv, ksam, wdata, cfg, floor=floor, contact=contact, grav=grav,
-                           iters=args.iters, log=log, tag="C")
+                           iters=args.iters, log=log, tag="C", ztgt=ztgt)
         kpC, _ = forward_np(body, stage_c)
         contact, _ = detect_contacts(kpC, floor, cfg)
         st, wst, g = detect_standing(kpC, floor, contact, valid, cfg)
@@ -318,7 +344,7 @@ def run_episode(ep, args, cfg, scored, log):
         res["hip_target_frames"] = nh
         grav = (wst, htgt) if args.upright else None
         final = optimise(body, stage_c, init, K, kv, ksam, wdata, cfg, floor=floor, contact=contact, grav=grav,
-                         iters=args.iters // 2, log=log, tag="D")
+                         iters=args.iters // 2, log=log, tag="D", ztgt=ztgt)
     kpF, jF = forward_np(body, final)
     res["v5"] = v2.metrics(kpF, jF, kv, valid, sc, st2d)
     if floor is not None:
@@ -361,7 +387,10 @@ def main():
     ap.add_argument("--body-in", default=v2.BODY_DIR, help="per-frame HMR estimates (work/body format)")
     ap.add_argument("--iters", type=int, default=800)
     ap.add_argument("--holdout", action="store_true", help="fit on even frames only (2D error on odd frames)")
-    ap.add_argument("--no-upright", dest="upright", action="store_false", help="body_v2 behaviour")
+    ap.add_argument("--upright", dest="upright", action="store_true",
+                    help="enable the upright prior (off by default: it raised CD-H on Kaggle, submission S2)")
+    ap.add_argument("--no-upright", dest="upright", action="store_false", help="body_v2 behaviour (default)")
+    ap.add_argument("--depth-target", default="", help="compute_moge_depth_target.py output (pelvis depth target)")
     ap.add_argument("--cfg", default="", help="JSON overrides of DEFAULT_CFG")
     ap.add_argument("--tag", default="")
     ap.add_argument("--scored", default=f"{WORK}/body_v2/scored_frames.json")

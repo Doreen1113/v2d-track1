@@ -94,21 +94,22 @@ def stationary_feet_2d(kv, kpsam, valid):
     return C
 
 
-def assembled_pose(b, sigma_h):
-    """Pose as written by assemble_episode.py (invalid frames interpolated, angles unwrapped, Gaussian sigma_h)."""
-    if not sigma_h:
+def assembled_pose(b, sigma_h, sigma_f=None, sigma_a=None):
+    """Pose as written by assemble_episode.py (invalid frames interpolated, angles unwrapped, Gaussian sigma_h;
+    sigma_f / sigma_a: separate sigmas for the fingers / arm chain, as --sigma-fingers / --sigma-arms there)."""
+    if not sigma_h and sigma_f is None and sigma_a is None:
         return b["pose"]
-    from assemble_episode import fill_invalid, smooth, unwrap_euler
+    from assemble_episode import fill_invalid, smooth_pose, unwrap_euler
     valid = b["valid"].astype(bool) if "valid" in b.files else np.ones(len(b["pose"]), bool)
-    return smooth(unwrap_euler(fill_invalid(b["pose"], valid), list(range(3, 136))), sigma_h)
+    return smooth_pose(unwrap_euler(fill_invalid(b["pose"], valid), list(range(3, 136))), sigma_h, sigma_f, sigma_a)
 
 
-def evaluate(ep, body_dir, ref_dir, mhr, F, kmap, scored, device, stride=3, sigma_h=0.0, fast=False):
+def evaluate(ep, body_dir, ref_dir, mhr, F, kmap, scored, device, stride=3, sigma_h=0.0, fast=False, sigma_a=None):
     b = np.load(os.path.join(body_dir, f"episode_{ep:06d}.npz"))
     raw = np.load(os.path.join(WORK, "body", f"episode_{ep:06d}.npz"))
     valid = raw["valid"].astype(bool)
     K = np.array([float(raw["fx"]), float(raw["fy"]), float(raw["cx"]), float(raw["cy"])])
-    pose = assembled_pose(b, sigma_h)
+    pose = assembled_pose(b, sigma_h, sigma_a=sigma_a)
     T = len(pose)
     V, J = mhr(pose, b["scales"], b["shape"])
     kp = kp70(V, J, kmap)
@@ -154,7 +155,7 @@ def evaluate(ep, body_dir, ref_dir, mhr, F, kmap, scored, device, stride=3, sigm
         if ref_dir:
             r = np.load(os.path.join(ref_dir, f"episode_{ep:06d}.npz"))
             first = scored[0] if scored else int(np.flatnonzero(valid)[0])
-            Vr, Jr = mhr(assembled_pose(r, sigma_h)[[first]], r["scales"], r["shape"])
+            Vr, Jr = mhr(assembled_pose(r, sigma_h)[[first]], r["scales"], r["shape"])  # reference: plain sigma_h
             out["first_mpjpe_cm"] = float(np.linalg.norm(Jr[0, J22] - J[first, J22], axis=-1).mean() * 100)
             out["first_pa_v2v_cm"] = float(np.linalg.norm(sim3(V[first], Vr[0]) - Vr[0], axis=-1).mean() * 100)
             out["first_depth_cm"] = float((J[first, 1, 2] - Jr[0, 1, 2]) * 100)
@@ -232,6 +233,7 @@ def main():
     ap.add_argument("--scored", default=os.path.join(WORK, "body_v2/scored_frames.json"))
     ap.add_argument("--sigma-h", type=float, default=0.0, help="evaluate after the assembly pose smoothing")
     ap.add_argument("--fast", action="store_true", help="skip the silhouette IoU and MoGe depth-ratio proxies")
+    ap.add_argument("--sigma-arms", type=float, default=None, help="separate sigma for the arm chain")
     a = ap.parse_args()
     dev = "cuda" if torch.cuda.is_available() else "cpu"
     mhr = MHRForward(device=dev)
@@ -241,7 +243,8 @@ def main():
     scored = {int(k): v for k, v in json.load(open(a.scored)).items()}
     os.makedirs(a.out, exist_ok=True)
     for ep in a.episodes:
-        out, s = evaluate(ep, a.body, a.ref, mhr, F, kmap, scored.get(ep, []), dev, sigma_h=a.sigma_h, fast=a.fast)
+        out, s = evaluate(ep, a.body, a.ref, mhr, F, kmap, scored.get(ep, []), dev, sigma_h=a.sigma_h, fast=a.fast,
+                          sigma_a=a.sigma_arms)
         print(ep, " ".join(f"{k}={v:.3f}" for k, v in out.items()), flush=True)
         with open(os.path.join(a.out, f"episode_{ep:06d}.json"), "w") as f:
             json.dump(dict(metrics=out, series=s), f)
