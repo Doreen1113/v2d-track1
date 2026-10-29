@@ -1,0 +1,123 @@
+{
+ "0": {
+  "base": "v5",
+  "reason": "hoop rests on the floor on 168/169 scored frames; v4 floats 3 cm above the body floor (too close along the ray), v5 floor-pinned"
+ },
+ "2": {
+  "base": "v4",
+  "static": "v5",
+  "reason": "end segment 709-865 (58 scored frames) 5 cm below the floor in v4; v5 floor-pinned; v4 kept while moving (higher IoU)"
+ },
+ "5": {
+  "base": "v5",
+  "held": "v4",
+  "reason": "bowl 6 cm below the floor at the first scored frame in v4 (v5 on the floor, bowl on the chair seat at the end); v5 moved the held bowl off the hands (gap 0.2 -> 2.0 cm), held frames from v4"
+ },
+ "8": {
+  "base": "v5",
+  "reason": "iron 5 cm below the floor at the first scored frame in v4; v5 on the floor with a smaller hand gap (1.1 -> 0.1 cm)"
+ },
+ "9": {
+  "base": "v5",
+  "reason": "desk segments 218-414 float 4-5 cm in v4; v5 floor-pinned (k 1.031). Whole v5 trajectory: mixing v5 static translations with the v4 scale cost 0.06 IoU"
+ },
+ "10": {
+  "base": "v5",
+  "reason": "desk floats 7 cm and sits 5 % in front of the MoGe depth in v4 (v3 contact k 0.938 from a foot push); v5 on the floor and MoGe-consistent"
+ },
+ "11": {
+  "base": "v5",
+  "reason": "desk floats 3-4 cm in v4; v5 floor-pinned (k 1.029). Whole v5 trajectory: mixing v5 static translations with the v4 scale cost 0.06 IoU"
+ },
+ "12": {
+  "base": "v4",
+  "reorient": [
+   [
+    0,
+    98
+   ],
+   [
+    330,
+    345
+   ],
+   [
+    346,
+    404
+   ]
+  ],
+  "min_gain": 0.04,
+  "reason": "pan handle points along the viewing ray on the table (mask shows it sideways): yaw re-search of the resting segments"
+ },
+ "13": {
+  "base": "v5",
+  "held": "v4",
+  "reorient": [
+   [
+    0,
+    106
+   ],
+   [
+    345,
+    374
+   ],
+   [
+    375,
+    424
+   ]
+  ],
+  "min_gain": 0.04,
+  "reason": "v4 rests the pan 20 % beyond the MoGe depth (v3 contact k 1.213): 62 cm high vs the 81 cm MoGe table, inside the actor; v5 sits on the table (78 cm) but moved the held pan 17 cm off the hands; static from v5, held from v4"
+ },
+ "14": {
+  "base": "v4",
+  "reorient": [
+   [
+    0,
+    141
+   ],
+   [
+    383,
+    441
+   ]
+  ],
+  "min_gain": 0.04,
+  "reason": "pan handle points at the camera on the table (mask shows it to the right): yaw re-search of the resting segments"
+ },
+ "17": {
+  "base": "v5",
+  "reason": "block 6 cm below the floor at the end in v4; v5 floor-pinned and its table segment matches the MoGe table top (gap 0.3 vs 2.0 cm)"
+ },
+ "20": {
+  "base": "v5",
+  "reason": "v4 places the roller 21 % beyond the MoGe depth (v3 contact k 1.213, the handle is not in the mesh): 61 cm high vs the 80 cm MoGe table, next to the actor's hip; v5 on the table"
+ },
+ "21": {
+  "base": "v5",
+  "reason": "roll 2 cm below the floor in v4; v5 floor-pinned"
+ },
+ "23": {
+  "base": "v5",
+  "reason": "v4 places the roll 11 % beyond the MoGe depth (v3 contact k 1.121): 18 cm below the floor and inside the actor's legs; v5 on the floor with the hand on top when it stands"
+ },
+ "24": {
+  "base": "v5",
+  "reason": "stool 1-2 cm off the floor in v4; v5 floor-pinned (same IoU)"
+ },
+ "25": {
+  "base": "v4",
+  "static": "v5",
+  "reorient": [
+   [
+    0,
+    119
+   ]
+  ],
+  "upright": true,
+  "min_gain": 0.03,
+  "reason": "stool lies on its side (tilt 83 deg) at the first scored frame in v4 and v5 while the masks show it standing: upright re-search of segment 0-119; end segment from v5 (v4 6 cm below the floor)"
+ },
+ "26": {
+  "base": "v5",
+  "reason": "stool 2 cm below the floor in v4; v5 floor-pinned (same IoU)"
+ }
+}

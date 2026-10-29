@@ -16,6 +16,8 @@ With --ref DIR also the change of the first scored frame w.r.t. that directory:
   first_depth_cm (pelvis depth change).
 
   python eval_body_proxies.py --body WORK/body_v3 --ref WORK/body_v2 --out WORK/body_v3/proxies
+  --sigma-h S evaluates the pose after the assembly smoothing (assemble_episode.py --sigma-h S), for both
+  --body and --ref. --fast skips the silhouette IoU and MoGe depth-ratio proxies (no pytorch3d needed).
 """
 import argparse
 import json
@@ -92,12 +94,21 @@ def stationary_feet_2d(kv, kpsam, valid):
     return C
 
 
-def evaluate(ep, body_dir, ref_dir, mhr, F, kmap, scored, device, stride=3):
+def assembled_pose(b, sigma_h):
+    """Pose as written by assemble_episode.py (invalid frames interpolated, angles unwrapped, Gaussian sigma_h)."""
+    if not sigma_h:
+        return b["pose"]
+    from assemble_episode import fill_invalid, smooth, unwrap_euler
+    valid = b["valid"].astype(bool) if "valid" in b.files else np.ones(len(b["pose"]), bool)
+    return smooth(unwrap_euler(fill_invalid(b["pose"], valid), list(range(3, 136))), sigma_h)
+
+
+def evaluate(ep, body_dir, ref_dir, mhr, F, kmap, scored, device, stride=3, sigma_h=0.0, fast=False):
     b = np.load(os.path.join(body_dir, f"episode_{ep:06d}.npz"))
     raw = np.load(os.path.join(WORK, "body", f"episode_{ep:06d}.npz"))
     valid = raw["valid"].astype(bool)
     K = np.array([float(raw["fx"]), float(raw["fy"]), float(raw["cx"]), float(raw["cy"])])
-    pose = b["pose"]
+    pose = assembled_pose(b, sigma_h)
     T = len(pose)
     V, J = mhr(pose, b["scales"], b["shape"])
     kp = kp70(V, J, kmap)
@@ -139,6 +150,15 @@ def evaluate(ep, body_dir, ref_dir, mhr, F, kmap, scored, device, stride=3):
     out["acc_root_xy"] = float(np.linalg.norm(ar[:, :2], axis=-1)[ok].mean() * 100)
     out["acc_root_z"] = float(np.abs(ar[:, 2])[ok].mean() * 100)
     out["acc_rel"] = float(np.linalg.norm(acc(js - J[:, 1:2]), axis=-1)[ok].mean() * 100)
+    if fast:
+        if ref_dir:
+            r = np.load(os.path.join(ref_dir, f"episode_{ep:06d}.npz"))
+            first = scored[0] if scored else int(np.flatnonzero(valid)[0])
+            Vr, Jr = mhr(assembled_pose(r, sigma_h)[[first]], r["scales"], r["shape"])
+            out["first_mpjpe_cm"] = float(np.linalg.norm(Jr[0, J22] - J[first, J22], axis=-1).mean() * 100)
+            out["first_pa_v2v_cm"] = float(np.linalg.norm(sim3(V[first], Vr[0]) - Vr[0], axis=-1).mean() * 100)
+            out["first_depth_cm"] = float((J[first, 1, 2] - Jr[0, 1, 2]) * 100)
+        return out, dict(pelvis_z=z.tolist())
     # silhouettes and MoGe depth consistency
     mk = np.load(os.path.join(WORK, "masks", f"episode_{ep:06d}.npz"))
     mh, mw = int(mk["mask_h"]), int(mk["mask_w"])
@@ -194,7 +214,7 @@ def evaluate(ep, body_dir, ref_dir, mhr, F, kmap, scored, device, stride=3):
     out["iou_first"] = iou.get(first, float("nan"))
     if ref_dir:
         r = np.load(os.path.join(ref_dir, f"episode_{ep:06d}.npz"))
-        Vr, Jr = mhr(r["pose"][[first]], r["scales"], r["shape"])
+        Vr, Jr = mhr(assembled_pose(r, sigma_h)[[first]], r["scales"], r["shape"])
         out["first_mpjpe_cm"] = float(np.linalg.norm(Jr[0, J22] - J[first, J22], axis=-1).mean() * 100)
         out["first_pa_v2v_cm"] = float(np.linalg.norm(sim3(V[first], Vr[0]) - Vr[0], axis=-1).mean() * 100)
         out["first_depth_cm"] = float((J[first, 1, 2] - Jr[0, 1, 2]) * 100)
@@ -210,6 +230,8 @@ def main():
     ap.add_argument("--out", required=True, help="directory for per-episode json")
     ap.add_argument("--episodes", type=int, nargs="*", default=list(range(30)))
     ap.add_argument("--scored", default=os.path.join(WORK, "body_v2/scored_frames.json"))
+    ap.add_argument("--sigma-h", type=float, default=0.0, help="evaluate after the assembly pose smoothing")
+    ap.add_argument("--fast", action="store_true", help="skip the silhouette IoU and MoGe depth-ratio proxies")
     a = ap.parse_args()
     dev = "cuda" if torch.cuda.is_available() else "cpu"
     mhr = MHRForward(device=dev)
@@ -219,7 +241,7 @@ def main():
     scored = {int(k): v for k, v in json.load(open(a.scored)).items()}
     os.makedirs(a.out, exist_ok=True)
     for ep in a.episodes:
-        out, s = evaluate(ep, a.body, a.ref, mhr, F, kmap, scored.get(ep, []), dev)
+        out, s = evaluate(ep, a.body, a.ref, mhr, F, kmap, scored.get(ep, []), dev, sigma_h=a.sigma_h, fast=a.fast)
         print(ep, " ".join(f"{k}={v:.3f}" for k, v in out.items()), flush=True)
         with open(os.path.join(a.out, f"episode_{ep:06d}.json"), "w") as f:
             json.dump(dict(metrics=out, series=s), f)
