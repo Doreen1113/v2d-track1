@@ -89,9 +89,11 @@ def load_scored(path):
 
 
 # ---------------------------------------------------------------------------------------- floor
-def fit_floor_moge(ep, n_frames=40, seed=0):
+def fit_floor_moge(ep, n_frames=40, seed=0, fx=None):
     """RANSAC planes on the static background (median MoGe depth over frames, person/object masked out).
-    Returns a list of candidate planes (n, d, inlier_frac) with n pointing up (towards -y of the camera)."""
+    Returns a list of candidate planes (n, d, inlier_frac) with n pointing up (towards -y of the camera).
+    fx: focal of the body run; if it differs from the MoGe focal, the background keeps its pixels and moves to
+    depth z * fx / fx_moge, as the body does."""
     d = np.load(f"{DEPTH_DIR}/episode_{ep:06d}.npz")
     D = d["depth"]
     K = d["K"].astype(np.float64) / float(d["downsample"])
@@ -113,6 +115,8 @@ def fit_floor_moge(ep, n_frames=40, seed=0):
     v, u = np.mgrid[0:h, 0:w]
     sel = (v > 0.45 * h) & np.isfinite(Z) & (Z < 15)
     P = np.stack([(u[sel] - K[0, 2]) / K[0, 0] * Z[sel], (v[sel] - K[1, 2]) / K[1, 1] * Z[sel], Z[sel]], 1)
+    if fx is not None:
+        P[:, 2] *= fx / float(d["K"][0, 0])
     rng = np.random.default_rng(seed)
     planes = []
     remaining = P.copy()

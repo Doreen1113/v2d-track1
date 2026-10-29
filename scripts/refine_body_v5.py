@@ -305,7 +305,7 @@ def run_episode(ep, args, cfg, scored, log):
     kpB, _ = forward_np(body, stage_b)
 
     # floor: MoGe normal, offset from the stage-B feet (identical to body_v2)
-    planes = fit_floor_moge(ep)
+    planes = fit_floor_moge(ep, fx=K[0])
     best = None
     for (n, dm, frac) in planes:
         hs = [(kpB[:, SOLE_KP[s]] @ n).min(1) for s in range(2)]
