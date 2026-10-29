@@ -104,9 +104,11 @@ def assembled_pose(b, sigma_h, sigma_f=None, sigma_a=None):
     return smooth_pose(unwrap_euler(fill_invalid(b["pose"], valid), list(range(3, 136))), sigma_h, sigma_f, sigma_a)
 
 
-def evaluate(ep, body_dir, ref_dir, mhr, F, kmap, scored, device, stride=3, sigma_h=0.0, fast=False, sigma_a=None):
+def evaluate(ep, body_dir, ref_dir, mhr, F, kmap, scored, device, stride=3, sigma_h=0.0, fast=False, sigma_a=None,
+             raw_dir=None):
     b = np.load(os.path.join(body_dir, f"episode_{ep:06d}.npz"))
-    raw = np.load(os.path.join(WORK, "body", f"episode_{ep:06d}.npz"))
+    # per-frame SAM 3D Body run the body was refined from: validity, intrinsics, SAM 2D keypoints
+    raw = np.load(os.path.join(raw_dir or os.path.join(WORK, "body"), f"episode_{ep:06d}.npz"))
     valid = raw["valid"].astype(bool)
     K = np.array([float(raw["fx"]), float(raw["fy"]), float(raw["cx"]), float(raw["cy"])])
     pose = assembled_pose(b, sigma_h, sigma_a=sigma_a)
@@ -234,6 +236,7 @@ def main():
     ap.add_argument("--sigma-h", type=float, default=0.0, help="evaluate after the assembly pose smoothing")
     ap.add_argument("--fast", action="store_true", help="skip the silhouette IoU and MoGe depth-ratio proxies")
     ap.add_argument("--sigma-arms", type=float, default=None, help="separate sigma for the arm chain")
+    ap.add_argument("--raw-dir", default=None, help="per-frame run with the intrinsics of --body (default work/body)")
     a = ap.parse_args()
     dev = "cuda" if torch.cuda.is_available() else "cpu"
     mhr = MHRForward(device=dev)
@@ -244,7 +247,7 @@ def main():
     os.makedirs(a.out, exist_ok=True)
     for ep in a.episodes:
         out, s = evaluate(ep, a.body, a.ref, mhr, F, kmap, scored.get(ep, []), dev, sigma_h=a.sigma_h, fast=a.fast,
-                          sigma_a=a.sigma_arms)
+                          sigma_a=a.sigma_arms, raw_dir=a.raw_dir)
         print(ep, " ".join(f"{k}={v:.3f}" for k, v in out.items()), flush=True)
         with open(os.path.join(a.out, f"episode_{ep:06d}.json"), "w") as f:
             json.dump(dict(metrics=out, series=s), f)

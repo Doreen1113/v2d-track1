@@ -244,7 +244,7 @@ def save_episode(ep, args, T, valid, R, sam_verts, cam, use_intrin_center, t0):
         scale_pca=R["scale_pca"], n_detections=R["ndet"].astype(np.int16),
         fx=fx, fy=fy, cx=cx, cy=cy, focal=fx, focal_source=fsrc, width=W, height=H, fps=fps,
         use_intrin_center=use_intrin_center, hf_repo=args.hf_repo, box_scale=args.box_scale,
-        inference_type="body" if args.body_only else "full")
+        inference_type="body" if args.body_only else "full", flip=bool(getattr(args, "flip", False)))
     if sam_verts:
         os.makedirs(os.path.join(args.out, "vis"), exist_ok=True)
         np.savez_compressed(os.path.join(args.out, "vis", f"episode_{ep:06d}_samverts.npz"),
@@ -252,6 +252,33 @@ def save_episode(ep, args, T, valid, R, sam_verts, cam, use_intrin_center, t0):
     dt = time.time() - t0
     print(f"ep {ep}: done T={T} valid={valid.sum()} multi-det frames={(R['ndet'] > 1).sum()} "
           f"focal={fx:.1f} ({fsrc}) time={dt:.1f}s ({dt / max(T, 1):.3f} s/frame)", flush=True)
+
+
+# MHR70 left/right keypoint pairs (for un-mirroring 2D keypoints of a flipped pass)
+_LR70 = [(1, 2), (3, 4), (5, 6), (7, 8), (9, 10), (11, 12), (13, 14), (15, 18), (16, 19), (17, 20), (63, 64), (65, 66),
+         (67, 68)] + [(21 + i, 42 + i) for i in range(21)]
+SWAP70 = np.arange(70)
+for _a, _b in _LR70:
+    SWAP70[_a], SWAP70[_b] = _b, _a
+
+
+def unflip_outputs(out, W):
+    """Undo a horizontal image flip for the root of one body-decoder output (camera x -> -x).
+    Root rotation (MHR native frame, extrinsic xyz Euler): R = M R' M with M = diag(-1, 1, 1); translation x -> -x;
+    2D keypoints u -> W - 1 - u with left/right swapped. Joint angles are NOT un-mirrored (only the root is usable)."""
+    from scipy.spatial.transform import Rotation
+    M = np.diag([-1.0, 1.0, 1.0])
+    p = out["mhr_model_params"].astype(np.float64).copy()
+    R = M @ Rotation.from_euler("xyz", p[3:6]).as_matrix() @ M
+    p[3:6] = Rotation.from_matrix(R).as_euler("xyz")
+    out["mhr_model_params"] = p.astype(np.float32)
+    t = out["pred_cam_t"].astype(np.float64).copy()
+    t[0] = -t[0]
+    out["pred_cam_t"] = t.astype(np.float32)
+    k = out["pred_keypoints_2d"].copy()
+    k[:, 0] = W - 1 - k[:, 0]
+    out["pred_keypoints_2d"] = k[SWAP70]
+    return out
 
 
 def infer_body_batch(est, imgs, boxes, K):
@@ -294,7 +321,8 @@ def process_episode_body_batched(ep, est, use_intrin_center, args):
     fps = float(cap.get(cv2.CAP_PROP_FPS))
     fx, fy, cx, cy, fsrc = load_intrinsics(ep, W, H, args.intr_dir)
     assert use_intrin_center, "batched path assumes USE_INTRIN_CENTER (no principal-point shift)"
-    K = torch.tensor([[[fx, 0, cx], [0, fy, cy], [0, 0, 1]]], dtype=torch.float32)
+    cxi = (W - 1 - cx) if args.flip else cx  # principal point of the mirrored image
+    K = torch.tensor([[[fx, 0, cxi], [0, fy, cy], [0, 0, 1]]], dtype=torch.float32)
     ref = np.load(os.path.join(args.boxes_from, f"episode_{ep:06d}.npz"))
     T = len(ref["valid"])
     todo = ref["valid"].astype(bool)
@@ -315,7 +343,12 @@ def process_episode_body_batched(ep, est, use_intrin_center, args):
     pend = []
 
     def flush():
-        res = infer_body_batch(est, [p[1] for p in pend], [p[2] for p in pend], K)
+        boxes = [p[2] for p in pend]
+        if args.flip:
+            boxes = [np.r_[W - 1 - b[2], b[1], W - 1 - b[0], b[3]] for b in boxes]
+        res = infer_body_batch(est, [p[1] for p in pend], boxes, K)
+        if args.flip:
+            res = [unflip_outputs(o, W) for o in res]
         for (t, _, box), out in zip(pend, res):
             valid[t] = True
             R["mhr_params"][t] = out["mhr_model_params"]
@@ -342,7 +375,8 @@ def process_episode_body_batched(ep, est, use_intrin_center, args):
         if args.box_scale != 1.0:
             c, hw = (box[:2] + box[2:]) / 2, (box[2:] - box[:2]) / 2 * args.box_scale
             box = np.r_[c - hw, c + hw]
-        pend.append((t, cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB), box))
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        pend.append((t, np.ascontiguousarray(rgb[:, ::-1]) if args.flip else rgb, box))
         if len(pend) == args.batch:
             flush()
             n_done = int(valid.sum())
@@ -374,6 +408,9 @@ def main():
     ap.add_argument("--stride", type=int, default=1, help="with --boxes-from: every n-th frame only")
     ap.add_argument("--body-only", action="store_true", help="with --boxes-from: body decoder only, batched frames")
     ap.add_argument("--batch", type=int, default=16, help="frames per forward pass with --body-only")
+    ap.add_argument("--flip", action="store_true",
+                    help="with --body-only: mirrored images; root rotation / translation and 2D keypoints are "
+                         "un-mirrored, the other joint angles are left mirrored (use the root only)")
     args = ap.parse_args()
 
     eps = list(range(30)) if args.all or not args.episodes else args.episodes

@@ -33,7 +33,7 @@ def project(kp, K):
     return np.stack([K[0] * kp[..., 0] / kp[..., 2] + K[2], K[1] * kp[..., 1] / kp[..., 2] + K[3]], -1)
 
 
-def run(d, ep, mode, sigma_h, mhr, kmap, frames, sigma_f=None, sigma_a=None):
+def run(d, ep, mode, sigma_h, mhr, kmap, frames, sigma_f=None, sigma_a=None, raw_dir=None):
     b = np.load(os.path.join(d, f"episode_{ep:06d}.npz"))
     if mode == "raw":
         uv = b["kp2d"][frames].astype(np.float64)
@@ -44,7 +44,7 @@ def run(d, ep, mode, sigma_h, mhr, kmap, frames, sigma_f=None, sigma_a=None):
         scl, shp = scl[frames], shp[frames]
     V, J = mhr(pose[frames], scl, shp)
     kp = np.einsum("kn,tnc->tkc", kmap, np.concatenate([V, J], 1))
-    raw = np.load(os.path.join(WORK, "body", f"episode_{ep:06d}.npz"))
+    raw = np.load(os.path.join(raw_dir or os.path.join(WORK, "body"), f"episode_{ep:06d}.npz"))  # intrinsics
     K = np.array([float(raw["fx"]), float(raw["fy"]), float(raw["cx"]), float(raw["cy"])])
     return project(kp, K)
 
@@ -57,6 +57,7 @@ def main():
     ap.add_argument("--sigma-h", type=float, default=0.0)
     ap.add_argument("--sigma-fingers", type=float, default=None)
     ap.add_argument("--sigma-arms", type=float, default=None)
+    ap.add_argument("--raw-dir", default=None, help="per-frame run with the intrinsics of the dirs (default work/body)")
     ap.add_argument("--hands", default=f"{WORK}/hand_kp2d")
     ap.add_argument("--thr", type=float, default=0.25)  # SimCC scores: median ~0.27
     ap.add_argument("--episodes", type=int, nargs="*", default=list(range(30)))
@@ -79,7 +80,7 @@ def main():
         conf = det[..., 2] > a.thr
         size = np.linalg.norm(det[:, :, 9, :2] - det[:, :, 0, :2], axis=-1)  # wrist -> middle MCP
         for d in a.dirs:
-            uv = run(d, ep, mode, a.sigma_h, mhr, kmap, fr, a.sigma_fingers, a.sigma_arms)
+            uv = run(d, ep, mode, a.sigma_h, mhr, kmap, fr, a.sigma_fingers, a.sigma_arms, a.raw_dir)
             pred = np.stack([uv[:, R70], uv[:, L70]], 1)  # [N,2,21,2]
             e = np.linalg.norm(pred - det[..., :2], axis=-1)
             fing, wr = conf.copy(), conf.copy()
