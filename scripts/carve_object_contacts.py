@@ -230,18 +230,28 @@ def csg_carve(v0, f0, P, s, a, dev):
         w[i] = np.abs(winding_numbers(v0, f0, pts, dev, chunk=16384)).reshape(n[1], n[2])
     obj = w - 0.5
     Pin = P[((P >= lo) & (P <= hi)).all(1)]
+    # the carved region lies inside the original one up to the simplification error, so only points inside the
+    # original mesh or close to it can end up inside or near the result
+    vt0, ft0 = torch.as_tensor(v0, device=dev), torch.as_tensor(f0, device=dev)
+    d0 = closest_triangles(torch.as_tensor(Pin, device=dev), vt0[ft0[:, 0]], vt0[ft0[:, 1]], vt0[ft0[:, 2]])[0]
+    close = (d0 < a.csg_band / 1000 / s).cpu().numpy()
+    far = np.flatnonzero(~close)
+    w_far = np.abs(winding_numbers(v0, f0, Pin[far], dev)) > 0.5 if len(far) else np.zeros(0, bool)
+    close[far[w_far]] = True
+    Pall, Pin = Pin, Pin[close]
     # distance to the nearest hand point: voxel distance transform, exact (KD tree) wherever it can matter
-    idx = np.clip(np.round((Pin - lo) / h).astype(int), 0, n - 1)
+    idx = np.clip(np.round((Pall - lo) / h).astype(int), 0, n - 1)
     seed = np.ones(n, bool)
     seed[tuple(idx.T)] = False
     d = distance_transform_edt(seed).astype(np.float32) * h
     near = np.flatnonzero((d < (a.csg_rmax / 1000 / s + 2 * h)).ravel() & (obj.ravel() > -0.25))
     if len(near):
         g = np.stack(np.unravel_index(near, n), 1) * h + lo
-        d.ravel()[near] = cKDTree(Pin).query(g, workers=a.threads)[0]
+        d.ravel()[near] = cKDTree(Pall).query(g, workers=a.threads)[0]
     budget_f, budget_v = cpe._STATE["budget"]
     target = min(budget_f, 2 * budget_v - 8) - 64
-    st = {"voxel_mm": float(h * s * 1000), "grid": [int(x) for x in n], "hand_points": int(len(Pin))}
+    st = {"voxel_mm": float(h * s * 1000), "grid": [int(x) for x in n], "hand_points": int(len(Pall)),
+          "checked_points": int(len(Pin))}
     v, f, ok = v0, f0, False
     r = a.csg_r
     rb = np.zeros(len(Pin))  # per-point radius for points that simplification keeps cutting back into, mm (0: none)
@@ -320,7 +330,10 @@ def carve(path, out_dir, a, dev):
     v0, f0 = strip_padding(*budget_mesh(str(mesh), *cpe._STATE["budget"]))
     f0 = f0.astype(np.int64)
     row = {"episode": int(path.stem.split("_")[1]), "mode": "direct"}
-    v, st, ok = carve_mesh(v0, f0, P, s, a, dev)
+    if a.skip_direct:
+        v, st, ok = v0, {"inside_before": 1, "unresolved": 0, "moved_vertices": 0}, False
+    else:
+        v, st, ok = carve_mesh(v0, f0, P, s, a, dev)
     row.update(st)
     f = f0
     if not ok and a.csg and st["inside_before"] + st["unresolved"] > 0:
@@ -365,6 +378,9 @@ def main():
     ap.add_argument("--csg-r", type=float, default=1.0, help="first ball radius around each hand point, mm")
     ap.add_argument("--csg-polish", type=int, default=60,
                     help="dent the CSG result directly when at most this many points are inside or near")
+    ap.add_argument("--csg-band", type=float, default=3.0,
+                    help="CSG checks only hand points inside the original mesh or within this of it, mm")
+    ap.add_argument("--skip-direct", action="store_true", help="go straight to CSG (episodes known to need it)")
     ap.add_argument("--csg-tries", type=int, default=12)
     ap.add_argument("--csg-boost", type=int, default=400,
                     help="once at most this many points are wrong, grow the radius only around them")
