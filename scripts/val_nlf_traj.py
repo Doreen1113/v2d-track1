@@ -62,6 +62,9 @@ def main():
     ap.add_argument("--with-object", action="store_true",
                     help="shift the object by the same per-frame offset as the body (keeps their relative pose, "
                          "so contacts and a carved object mesh stay valid)")
+    ap.add_argument("--object-sigma", type=float, default=0.0,
+                    help="with --with-object: low-pass the object's offset with a Gaussian of this many frames "
+                         "(steadier object; the contacts then change by the high-frequency part, re-carve after)")
     a = ap.parse_args()
     fw = MHRForward(device="cuda", dtype=torch.float64)
     eps = a.episodes if a.episodes is not None else sorted(
@@ -104,7 +107,10 @@ def main():
         if a.with_object:
             t = np.asarray(zp["object_translation"], np.float64)
             assert len(t) == T, (t.shape, T)
-            rec["object_translation"] = (t + (new - p)).astype(np.asarray(zp["object_translation"]).dtype)
+            off = new - p
+            if a.object_sigma > 0:
+                off = gaussian_filter1d(off, a.object_sigma, axis=0, mode="nearest")
+            rec["object_translation"] = (t + off).astype(np.asarray(zp["object_translation"]).dtype)
         np.savez(os.path.join(a.out, f"episode_{ep:06d}.npz"), **rec)
         for ext in (".ply", ".obj", ".glb", ".off", ".stl"):
             f = os.path.join(a.base, f"episode_{ep:06d}_object{ext}")
