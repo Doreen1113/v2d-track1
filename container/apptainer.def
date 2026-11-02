@@ -1,0 +1,48 @@
+# Apptainer / Singularity equivalent of container/Dockerfile (V2D Challenge Track 1, submission N1pw03).
+#
+# Build from the repository root (the %files paths are relative to the build directory):
+#   cd v2d-track1 && apptainer build --fakeroot /somewhere/v2d_track1.sif container/apptainer.def
+# Without /etc/subuid entries Apptainer >= 1.1 falls back to a root-mapped user namespace plus the
+# fakeroot command; the build then has to run from a local-disk working directory (a cluster /work
+# cwd was not stat-able inside that namespace; see container/README.md).
+# Run with the data tree bound at the path the scripts expect:
+#   apptainer exec --nv -B /path/to/v2d_root:/work/doreen071/v2d v2d_track1.sif bash
+Bootstrap: docker
+From: nvidia/cuda:12.6.3-cudnn-runtime-ubuntu22.04
+
+%files
+    container/requirements.txt /opt/requirements.txt
+    scripts /opt/v2d-track1/scripts
+    container /opt/v2d-track1/container
+
+%post
+    export DEBIAN_FRONTEND=noninteractive PIP_NO_CACHE_DIR=1
+    apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl git gnupg software-properties-common \
+        libgl1 libglib2.0-0 libsm6 libxext6 libxrender1 libgomp1
+    add-apt-repository -y ppa:deadsnakes/ppa
+    apt-get update && apt-get install -y --no-install-recommends python3.11 python3.11-venv python3.11-dev
+    rm -rf /var/lib/apt/lists/*
+    python3.11 -m venv /opt/venv
+    /opt/venv/bin/pip install -r /opt/requirements.txt
+    mkdir -p /work/doreen071/v2d
+    find /opt/v2d-track1 -name __pycache__ -type d -exec rm -rf {} + || true
+    chmod -R a+rX /opt/v2d-track1 /opt/venv
+
+%environment
+    export PATH=/opt/venv/bin:$PATH
+    export V2D_ROOT=/work/doreen071/v2d
+    export PYTHONUNBUFFERED=1
+    export PYTHONDONTWRITEBYTECODE=1
+
+%runscript
+    exec /opt/venv/bin/python "$@"
+
+%labels
+    Title V2D Challenge Track 1 reproduction (submission N1pw03)
+    RepoCommit f2f17f7
+
+%help
+    Python 3.11 + CUDA 12.6 environment of the Track 1 assembly / fusion / carving / scoring / packing
+    stages. Scripts: /opt/v2d-track1/scripts. Recipe: /opt/v2d-track1/container/reproduce.sh.
+    Bind the data tree at /work/doreen071/v2d (see /opt/v2d-track1/container/README.md).
